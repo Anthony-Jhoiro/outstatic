@@ -8,11 +8,11 @@ import { FormProvider, useForm } from 'react-hook-form'
 import showdown from 'showdown'
 import {
   AdminLayout,
-  MDEditor,
   DocumentSettings,
-  DocumentTitleInput
+  DocumentTitleInput,
+  MDEditor
 } from '../../components'
-import { OutstaticContext, DocumentContext } from '../../context'
+import { DocumentContext, OutstaticContext } from '../../context'
 import { useCreateCommitMutation } from '../../graphql/generated'
 import { Document, FileType } from '../../types'
 import { useOstSession } from '../../utils/auth/hooks'
@@ -26,13 +26,8 @@ import useNavigationLock from '../../utils/useNavigationLock'
 import useOid from '../../utils/useOid'
 import useTipTap from '../../utils/useTipTap'
 import { convertSchemaToYup, editDocumentSchema } from '../../utils/yup'
-import { createCommit as createCommitApi } from '../../utils/createCommit'
-import { assertUnreachable } from '../../utils/assertUnreachable'
-import { MetadataSchema } from '../../utils/metadata/types'
-import { hashFromUrl } from '../../utils/hashFromUrl'
-import MurmurHash3 from 'imurmurhash'
-import { stringifyMetadata } from '../../utils/metadata/stringify'
 import useFileQuery from '../../utils/useFileQuery'
+import { useUpsertPage } from '../../utils/api/pages/hooks'
 
 type EditDocumentProps = {
   collection: string
@@ -44,10 +39,8 @@ export default function EditDocument({ collection }: EditDocumentProps) {
   const { repoOwner, repoSlug, repoBranch, contentPath, monorepoPath } =
     useContext(OutstaticContext)
   const { session } = useOstSession()
-  const [loading, setLoading] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [files, setFiles] = useState<FileType[]>([])
-  const [createCommit] = useCreateCommitMutation()
   const fetchOid = useOid()
   const [showDelete, setShowDelete] = useState(false)
   const [documentSchema, setDocumentSchema] = useState(editDocumentSchema)
@@ -56,6 +49,14 @@ export default function EditDocument({ collection }: EditDocumentProps) {
   })
   const { editor } = useTipTap({ ...methods })
   const [customFields, setCustomFields] = useState({})
+
+  const { mutate: upsertPage, isLoading } = useUpsertPage({
+    onSuccess() {
+      setHasChanges(false)
+      setSlug(methods.getValues().slug)
+      setShowDelete(true)
+    }
+  })
 
   const editDocument = (property: string, value: any) => {
     const formValues = methods.getValues()
@@ -77,130 +78,159 @@ export default function EditDocument({ collection }: EditDocumentProps) {
   })
 
   const onSubmit = async (data: Document) => {
-    setLoading(true)
-    try {
-      const document = methods.getValues()
-      let content = mergeMdMeta({ ...data })
-      const { data: matterData } = matter(content)
-      const oid = await fetchOid()
-      const owner = repoOwner || session?.user?.login || ''
-      const newSlug = document.slug
+    const document = methods.getValues()
+    let content = mergeMdMeta({ ...data })
+    const { data: matterData } = matter(content)
+    const oid = await fetchOid()
+    const owner = repoOwner || session?.user?.login || ''
+    const newSlug = document.slug
 
-      // If the slug has changed, commit should delete old file
-      const oldSlug = slug !== newSlug && slug !== 'new' ? slug : undefined
+    upsertPage({
+      originalContent: content,
+      matterData,
+      oid,
+      owner,
+      newSlug,
+      slug,
+      repoSlug,
+      repoBranch,
+      monorepoPath,
+      contentPath,
+      collection,
+      files,
+      oldSlug: slug !== newSlug && slug !== 'new' ? slug : undefined,
+      metadata: metadata
+    })
 
-      const capi = createCommitApi({
-        message: oldSlug
-          ? `chore: Updates ${newSlug} formerly ${oldSlug}`
-          : `chore: Updates/Creates ${newSlug}`,
-        owner,
-        oid: oid ?? '',
-        name: repoSlug,
-        branch: repoBranch
-      })
-
-      if (oldSlug) {
-        capi.removeFile(
-          `${
-            monorepoPath ? monorepoPath + '/' : ''
-          }${contentPath}/${collection}/${oldSlug}.md`
-        )
-      }
-
-      if (files.length > 0) {
-        files.forEach(({ filename, blob, type, content: fileContents }) => {
-          // check if blob is still in the document before adding file to the commit
-          if (blob && content.search(blob) !== -1) {
-            const randString = window
-              .btoa(Math.random().toString())
-              .substring(10, 6)
-            const newFilename = filename
-              .toLowerCase()
-              .replace(/[^a-zA-Z0-9-_\.]/g, '-')
-              .replace(/(\.[^\.]*)?$/, `-${randString}$1`)
-
-            const filePath = (() => {
-              switch (type) {
-                case 'images':
-                  return IMAGES_PATH
-                default:
-                  assertUnreachable(type)
-              }
-            })()
-
-            capi.replaceFile(
-              `${
-                monorepoPath ? monorepoPath + '/' : ''
-              }public/${filePath}${newFilename}`,
-              fileContents,
-              false
-            )
-
-            // replace blob in content with path
-            content = content.replace(blob, `/${filePath}${newFilename}`)
-          }
-        })
-      }
-
-      capi.replaceFile(
-        `${
-          monorepoPath ? monorepoPath + '/' : ''
-        }${contentPath}/${collection}/${newSlug}.md`,
-        content
-      )
-
-      // update metadata for this post
-      // requires final content for hashing
-      if (metadata?.repository?.object?.__typename === 'Blob') {
-        const m = JSON.parse(
-          metadata.repository.object.text ?? '{}'
-        ) as MetadataSchema
-        m.generated = new Date().toISOString()
-        m.commit = hashFromUrl(metadata.repository.object.commitUrl)
-        ;(m.metadata ?? []).filter(
-          (c) =>
-            c.collection !== collection &&
-            (c.slug !== oldSlug || c.slug !== newSlug)
-        )
-        const state = MurmurHash3(content)
-        m.metadata.push({
-          ...matterData,
-          title: matterData.title,
-          publishedAt: matterData.publishedAt,
-          status: matterData.published,
-          slug: newSlug,
-          collection,
-          __outstatic: {
-            hash: `${state.result()}`,
-            commit: m.commit,
-            path: `${contentPath}/${collection}/${newSlug}.md`
-          }
-        })
-
-        capi.replaceFile(
-          `${
-            monorepoPath ? monorepoPath + '/' : ''
-          }${contentPath}/metadata.json`,
-          stringifyMetadata(m)
-        )
-      }
-
-      const input = capi.createInput()
-
-      await createCommit({
-        variables: {
-          input
-        }
-      })
-      setLoading(false)
-      setHasChanges(false)
-      setSlug(newSlug)
-      setShowDelete(true)
-    } catch (error) {
-      // TODO: Better error treatment
-      setLoading(false)
-      console.log({ error })
-    }
+    // await fetch('/api/outstatic/pages', {
+    //   method: 'POST',
+    //   body: JSON.stringify({
+    //     originalContent: content,
+    //     matterData,
+    //     oid,
+    //     owner,
+    //     newSlug,
+    //     slug,
+    //     repoSlug,
+    //     repoBranch,
+    //     monorepoPath,
+    //     contentPath,
+    //     collection,
+    //     files
+    //   }),
+    //   headers: {
+    //     'Content-Type': 'application/json',
+    //   }
+    // })
+    //
+    // // return
+    //
+    // // If the slug has changed, commit should delete old file
+    // const oldSlug = slug !== newSlug && slug !== 'new' ? slug : undefined
+    //
+    // const capi = createCommitApi({
+    //   message: oldSlug
+    //     ? `chore: Updates ${newSlug} formerly ${oldSlug}`
+    //     : `chore: Updates/Creates ${newSlug}`,
+    //   owner,
+    //   oid: oid ?? '',
+    //   name: repoSlug,
+    //   branch: repoBranch
+    // })
+    //
+    // if (oldSlug) {
+    //   capi.removeFile(
+    //     `${
+    //       monorepoPath ? monorepoPath + '/' : ''
+    //     }${contentPath}/${collection}/${oldSlug}.md`
+    //   )
+    // }
+    //
+    // if (files.length > 0) {
+    //   files.forEach(({ filename, blob, type, content: fileContents }) => {
+    //     // check if blob is still in the document before adding file to the commit
+    //     if (blob && content.search(blob) !== -1) {
+    //       const randString = window
+    //         .btoa(Math.random().toString())
+    //         .substring(10, 6)
+    //       const newFilename = filename
+    //         .toLowerCase()
+    //         .replace(/[^a-zA-Z0-9-_\.]/g, '-')
+    //         .replace(/(\.[^\.]*)?$/, `-${randString}$1`)
+    //
+    //       const filePath = (() => {
+    //         switch (type) {
+    //           case 'images':
+    //             return IMAGES_PATH
+    //           default:
+    //             assertUnreachable(type)
+    //         }
+    //       })()
+    //
+    //       capi.replaceFile(
+    //         `${
+    //           monorepoPath ? monorepoPath + '/' : ''
+    //         }public/${filePath}${newFilename}`,
+    //         fileContents,
+    //         false
+    //       )
+    //
+    //       // replace blob in content with path
+    //       content = content.replace(blob, `/${filePath}${newFilename}`)
+    //     }
+    //   })
+    // }
+    //
+    // capi.replaceFile(
+    //   `${
+    //     monorepoPath ? monorepoPath + '/' : ''
+    //   }${contentPath}/${collection}/${newSlug}.md`,
+    //   content
+    // )
+    //
+    // // update metadata for this post
+    // // requires final content for hashing
+    // if (metadata?.repository?.object?.__typename === 'Blob') {
+    //   const m = JSON.parse(
+    //     metadata.repository.object.text ?? '{}'
+    //   ) as MetadataSchema
+    //   m.generated = new Date().toISOString()
+    //   m.commit = hashFromUrl(metadata.repository.object.commitUrl)
+    //   ;(m.metadata ?? []).filter(
+    //     (c) =>
+    //       c.collection !== collection &&
+    //       (c.slug !== oldSlug || c.slug !== newSlug)
+    //   )
+    //   const state = MurmurHash3(content)
+    //   m.metadata.push({
+    //     ...matterData,
+    //     title: matterData.title,
+    //     publishedAt: matterData.publishedAt,
+    //     status: matterData.published,
+    //     slug: newSlug,
+    //     collection,
+    //     __outstatic: {
+    //       hash: `${state.result()}`,
+    //       commit: m.commit,
+    //       path: `${contentPath}/${collection}/${newSlug}.md`
+    //     }
+    //   })
+    //
+    //   capi.replaceFile(
+    //     `${
+    //       monorepoPath ? monorepoPath + '/' : ''
+    //     }${contentPath}/metadata.json`,
+    //     stringifyMetadata(m)
+    //   )
+    // }
+    //
+    // const input = capi.createInput()
+    //
+    // await createCommit({
+    //   variables: {
+    //     input
+    //   }
+    // })
   }
 
   useEffect(() => {
@@ -310,7 +340,7 @@ export default function EditDocument({ collection }: EditDocumentProps) {
             title={methods.getValues('title')}
             settings={
               <DocumentSettings
-                loading={loading}
+                loading={isLoading}
                 saveFunc={methods.handleSubmit(onSubmit)}
                 showDelete={showDelete}
                 customFields={customFields}
