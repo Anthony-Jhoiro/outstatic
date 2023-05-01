@@ -5,11 +5,68 @@ import { hashFromUrl } from '../../hashFromUrl'
 import { DocumentQuery } from '../../../graphql/generated'
 import MurmurHash3 from 'imurmurhash'
 import { stringifyMetadata } from '../../metadata/stringify'
+import { FileType } from '../../../types'
+import { IMAGES_PATH } from '../../constants'
+import { assertUnreachable } from '../../assertUnreachable'
+import { v4 as uuidV4 } from 'uuid'
+import { Base64 } from 'js-base64'
 
 type UpsertPageTypeToRename = Omit<UpsertPageType, 'replaceFiles'> & {
   oldSlug: string | undefined
   metadata?: DocumentQuery
   matterData: { [p: string]: any }
+  files: FileType[]
+}
+
+function handleFiles(
+  files: FileType[],
+  originalContent: string,
+  monorepoPath: string
+) {
+  let content = originalContent
+  const blobsToReplace = files
+    // check if blob is still in the document before adding file to the commit
+    .filter(({ blob }) => blob && content.search(blob) !== -1)
+    .map(({ filename, blob, type, content: fileContents }) => {
+      const randString = uuidV4()
+      const newFilename = filename
+        .toLowerCase()
+        .replace(/[^a-zA-Z0-9-_.]/g, '-')
+        .replace(/(\.[^.]*)?$/, `-${randString}$1`)
+
+      const filePath = (() => {
+        switch (type) {
+          case 'images':
+            return IMAGES_PATH
+          default:
+            assertUnreachable(type)
+        }
+      })()
+
+      const newFilePath = `/${filePath}${newFilename}`
+
+      return {
+        file: `${monorepoPath ? monorepoPath + '/' : ''}public${newFilePath}`,
+        content: Base64.encode(fileContents),
+        blob: blob as string,
+        newFilePath
+      }
+    })
+
+  blobsToReplace.forEach(
+    (file) => (content = content.replace(file.blob, file.newFilePath))
+  )
+
+  return {
+    content,
+    toReplace: blobsToReplace.reduce(
+      (acc, blobToReplace) => ({
+        ...acc,
+        [blobToReplace.file]: blobToReplace.content
+      }),
+      {}
+    )
+  }
 }
 
 export const saveMetadata = ({
@@ -57,10 +114,16 @@ export const saveMetadata = ({
 }
 
 export function upsertPage(pageInfo: UpsertPageTypeToRename) {
-  const filesToReplace = saveMetadata(pageInfo)
+  const metadataReplacements = saveMetadata(pageInfo)
+
+  const { content, toReplace } = handleFiles(
+    pageInfo.files,
+    pageInfo.originalContent,
+    pageInfo.monorepoPath
+  )
 
   const body: UpsertPageType = {
-    originalContent: pageInfo.originalContent,
+    originalContent: content,
     oid: pageInfo.oid,
     owner: pageInfo.owner,
     newSlug: pageInfo.newSlug,
@@ -70,8 +133,10 @@ export function upsertPage(pageInfo: UpsertPageTypeToRename) {
     monorepoPath: pageInfo.monorepoPath,
     contentPath: pageInfo.contentPath,
     collection: pageInfo.collection,
-    files: pageInfo.files,
-    replaceFiles: filesToReplace
+    replaceFiles: {
+      ...toReplace,
+      ...metadataReplacements
+    }
   }
 
   return fetch('/api/outstatic/pages', {

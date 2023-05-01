@@ -27,3 +27,11 @@ export const OutstaticApi = (req: Request, res: NextApiResponse) => {
 
   return apiRoutes[ost[0]](req, res)
 }
+
+export const OutstaticApiConfig = {
+  api: {
+    bodyParser: {
+      sizeLimit: '20mb'
+    }
+  }
+}

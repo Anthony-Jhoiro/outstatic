@@ -1,9 +1,7 @@
 import { NextApiRequest, NextApiResponse } from 'next'
 import { getLoginSession } from '../../../utils/auth/auth'
-import { FileType, Session } from '../../../types'
+import { Session } from '../../../types'
 import { createCommit as createCommitApi } from '../../../utils/createCommit'
-import { IMAGES_PATH } from '../../../utils/constants'
-import { assertUnreachable } from '../../../utils/assertUnreachable'
 import { initializeApollo } from '../../../utils/apollo'
 import {
   CreateCommitDocument,
@@ -22,7 +20,6 @@ export type UpsertPageType = {
   monorepoPath: string
   contentPath: string
   collection: string
-  files: FileType[]
   replaceFiles: Record<string, string>
 }
 
@@ -44,7 +41,6 @@ export async function postHandler(
     monorepoPath,
     contentPath,
     collection,
-    files,
     replaceFiles
   } = body
 
@@ -71,41 +67,6 @@ export async function postHandler(
         monorepoPath ? monorepoPath + '/' : ''
       }${contentPath}/${collection}/${oldSlug}.md`
     )
-  }
-
-  if (files.length > 0) {
-    files.forEach(({ filename, blob, type, content: fileContents }) => {
-      // check if blob is still in the document before adding file to the commit
-      if (blob && content.search(blob) !== -1) {
-        const randString = window
-          .btoa(Math.random().toString())
-          .substring(10, 6)
-        const newFilename = filename
-          .toLowerCase()
-          .replace(/[^a-zA-Z0-9-_\.]/g, '-')
-          .replace(/(\.[^\.]*)?$/, `-${randString}$1`)
-
-        const filePath = (() => {
-          switch (type) {
-            case 'images':
-              return IMAGES_PATH
-            default:
-              assertUnreachable(type)
-          }
-        })()
-
-        capi.replaceFile(
-          `${
-            monorepoPath ? monorepoPath + '/' : ''
-          }public/${filePath}${newFilename}`,
-          fileContents,
-          false
-        )
-
-        // replace blob in content with path
-        content = content.replace(blob, `/${filePath}${newFilename}`)
-      }
-    })
   }
 
   capi.replaceFile(
