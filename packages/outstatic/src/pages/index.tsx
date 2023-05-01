@@ -21,6 +21,7 @@ import Login from './login'
 import Settings from './settings'
 import Welcome from './welcome'
 import AddCustomField from './add-custom-field'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 type OutstaticProps = {
   missingEnvVars: EnvVarsType | false
@@ -83,24 +84,32 @@ export const Outstatic = ({ missingEnvVars, providerData }: OutstaticProps) => {
 
   const isContent = slug && collections.includes(slug)
 
+  const queryClient = new QueryClient()
+
   return (
-    <OutstaticProvider
-      {...providerData}
-      pages={pages}
-      collections={collections}
-      addPage={addPage}
-      removePage={removePage}
-    >
-      <ApolloProvider client={client}>
-        {!slug && <Collections />}
-        {slug2 && isContent && <EditDocument collection={slug} />}
-        {!slug2 && isContent ? <List collection={slug} /> : defaultPages[slug]}
-        {slug === 'collections' && collections.includes(slug2) && (
-          <AddCustomField collection={slug2} />
-        )}
-        {!!slug2 && !isContent && <NewCollection />}
-      </ApolloProvider>
-    </OutstaticProvider>
+    <QueryClientProvider client={queryClient}>
+      <OutstaticProvider
+        {...providerData}
+        pages={pages}
+        collections={collections}
+        addPage={addPage}
+        removePage={removePage}
+      >
+        <ApolloProvider client={client}>
+          {!slug && <Collections />}
+          {slug2 && isContent && <EditDocument collection={slug} />}
+          {!slug2 && isContent ? (
+            <List collection={slug} />
+          ) : (
+            defaultPages[slug]
+          )}
+          {slug === 'collections' && collections.includes(slug2) && (
+            <AddCustomField collection={slug2} />
+          )}
+          {!!slug2 && !isContent && <NewCollection />}
+        </ApolloProvider>
+      </OutstaticProvider>
+    </QueryClientProvider>
   )
 }
 
